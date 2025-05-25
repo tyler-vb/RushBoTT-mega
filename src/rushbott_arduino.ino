@@ -1,77 +1,85 @@
 #include "AccelStepper.h"
 #include "motor_packet.hpp"
-
+#include "limit_switch.hpp"
+#include <Arduino.h>
 
 #define LED_PIN 13
 
-#define LOWER_LIMIT_SWITCH_PIN 2
-#define LOWER_DIR_PIN 8
-#define LOWER_STEP_PIN 9
+#define LOWER_ARM_LOW_LIMIT_SWITCH_PIN 3
+#define LOWER_ARM_HIGH_LIMIT_SWITCH_PIN 5
+#define LOWER_ARM_DIR_PIN 7
+#define LOWER_ARM_STEP_PIN 8
 
-#define UPPER_LIMIT_SWITCH_PIN 3
-#define UPPER_DIR_PIN 6
-#define UPPER_STEP_PIN 7
+#define UPPER_ARM_HIGH_LIMIT_SWITCH_PIN 6
+#define UPPER_ARM_DIR_PIN 9
+#define UPPER_ARM_STEP_PIN 10
 
 #define MOTOR_INTERFACE_TYPE 1
 
-AccelStepper lower_arm_stepper(MOTOR_INTERFACE_TYPE, LOWER_STEP_PIN, LOWER_DIR_PIN);
-AccelStepper upper_arm_stepper(MOTOR_INTERFACE_TYPE, UPPER_STEP_PIN, UPPER_DIR_PIN);
-AccelStepper* steppers[] = {&lower_arm_stepper, &upper_arm_stepper};
+const long steps_per_rev = 6400;
+const double steps_per_degree = steps_per_rev / 360.0;
+const double steps_per_rad = steps_per_rev / (2*M_PI);
 
-size_t num_steppers = sizeof(steppers) / sizeof(steppers[0]);
+AccelStepper steppers[] = {
+  AccelStepper(MOTOR_INTERFACE_TYPE, LOWER_ARM_STEP_PIN, LOWER_ARM_DIR_PIN),
+  AccelStepper(MOTOR_INTERFACE_TYPE, UPPER_ARM_STEP_PIN, UPPER_ARM_DIR_PIN)
+};
 
-const int step_per_rev = 1600;
-const double step_per_degree = step_per_rev / 360.0;
-const double step_per_rad = step_per_rev / (2*M_PI);
+const int num_steppers = sizeof(steppers) / sizeof(steppers[0]);
 
-const int stepper_lower_limits[] = {10 * (step_per_degree), -360 * (step_per_degree)};
-const int stepper_upper_limits[] = {360 * (step_per_degree), 0 * (step_per_degree)};
+LimitSwitch switches[] = {
+  {LOWER_ARM_LOW_LIMIT_SWITCH_PIN, 0, (int)(155*5.785714*(steps_per_degree))},
+  {LOWER_ARM_HIGH_LIMIT_SWITCH_PIN, 0, (int)(90*(steps_per_degree))},
+  {UPPER_ARM_HIGH_LIMIT_SWITCH_PIN, 1, (int)(240*5.785714*(steps_per_degree))}
+};
+
+const int num_switches = sizeof(switches) / sizeof(switches[0]);
+const unsigned long debounce_delay = 25;
+int arm_state = -1;
+bool calibrating = false;
+const double calibration_speed = 0.3*steps_per_rev;
 
 const int packet_size = sizeof(MotorPacket);
 uint8_t packet_buffer[packet_size];
 size_t byte_count = 0;
 unsigned long packet_start_time = 0;
-const unsigned long timeout_ms = 200;
+const unsigned int timeout_ms = 5;
 
 void setup() {
-  pinMode(LOWER_LIMIT_SWITCH_PIN, INPUT_PULLUP);
-  pinMode(UPPER_LIMIT_SWITCH_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
-
-  attachInterrupt(digitalPinToInterrupt(LOWER_LIMIT_SWITCH_PIN), calibrate_lower_arm_stepper, RISING);
-  attachInterrupt(digitalPinToInterrupt(UPPER_LIMIT_SWITCH_PIN), calibrate_upper_arm_stepper, RISING);
-
-  for (auto i = 0u; i < num_steppers; i++)
+  for (int i = 0; i < num_switches; i++)
   {
-    steppers[i]->setMaxSpeed(step_per_rev * 6);
-    steppers[i]->setAcceleration(step_per_rev * 3);
-    steppers[i]->setPinsInverted(true,false,false);
+    pinMode(switches[i].pin, INPUT_PULLUP);
+  }
+  
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  for (int i = 0; i < num_steppers; i++)
+  {
+    steppers[i].setMaxSpeed(steps_per_rev * 6);
+    steppers[i].setAcceleration(steps_per_rev * 3);
   }
 
-  calibrate_lower_arm_stepper();
-  calibrate_upper_arm_stepper();
+  steppers[1].setPinsInverted(true,false,false);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
 }
 
 void loop() {
-
-  // Serial event loop
+  
   if (Serial.available() > 0)
-  {  
+  {      
     uint8_t byte = Serial.read();
 
     if (byte_count == 0 && byte == 0x64)
     {
       packet_start_time = millis();
     }
-
     if (packet_start_time > 0 && byte_count < packet_size)
     {
       packet_buffer[byte_count] = byte;
       byte_count++;
     }
-
     if (byte_count == packet_size)
     {
       MotorPacket packet = {};
@@ -84,7 +92,6 @@ void loop() {
 
       byte_count = 0;
       packet_start_time = 0;
-      digitalWrite(LED_PIN, LOW);
     }
   }
 
@@ -92,25 +99,117 @@ void loop() {
   {
     byte_count = 0;
     packet_start_time = 0;
-    digitalWrite(LED_PIN, HIGH);
   }
 
+  poll_switches();
 
-  for (auto i = 0u; i < num_steppers; i++)
+  if (arm_state == -1)
+  {
+    digitalWrite(LED_PIN, LOW);
+    for (int i = 0; i < num_steppers; i++)
     {
-      steppers[i]->runSpeed();
+      steppers[i].run();
+    }
+  }
+  else if (arm_state < num_switches)
+  {
+    digitalWrite(LED_PIN, HIGH);
+    calibrate();
+  }
+  else if (arm_state == num_switches + 1)
+  {
+    digitalWrite(LED_PIN, HIGH);
+    initialize();
+
+  }
+  
+}
+
+void poll_switches()
+{
+  for (int i = 0; i < num_switches; i++)
+  {
+    LimitSwitch &sw = switches[i];
+    bool current_state = digitalRead(sw.pin);
+
+    if (current_state != sw.last_state)
+    {
+      sw.last_debounce = millis();
     }
 
+    if ((millis() - sw.last_debounce) > debounce_delay)
+    {
+      if (current_state == HIGH && !sw.pressed)
+      {
+        sw.pressed = true;
+        steppers[sw.stepper_index].setCurrentPosition(sw.limit);
+      }
+      else if (current_state == LOW && sw.pressed)
+      {
+        sw.pressed = false;
+      }
+    }
+
+    sw.last_state = current_state;
+  }
 }
 
-void calibrate_lower_arm_stepper() 
+void calibrate()
 {
-  lower_arm_stepper.setCurrentPosition(stepper_lower_limits[0]);
+  int direction = 0;
+  LimitSwitch &lim_switch = switches[arm_state];
+  AccelStepper &stepper = steppers[lim_switch.stepper_index];
+
+  if (arm_state == 1)
+  {
+    arm_state++;
+    return;
+  }
+
+  if (!calibrating)
+  {
+    if (lim_switch.pressed)
+    {
+    stepper.move(-0.1*5.785714*steps_per_rev);
+    stepper.setSpeed(-calibration_speed);
+    }
+    else if (stepper.distanceToGo() == 0)
+    {
+      calibrating = true;
+      stepper.move(5.785714*steps_per_rev);
+      stepper.setSpeed(calibration_speed);
+    }
+  }
+  else if (lim_switch.pressed)
+  {
+    stepper.stop();
+    calibrating = false;
+    arm_state++;
+  }
+  stepper.runSpeedToPosition();
 }
 
-void calibrate_upper_arm_stepper() 
+void initialize()
 {
-  upper_arm_stepper.setCurrentPosition(stepper_upper_limits[1]);
+  bool initialized = true;
+
+  int index = 0;
+
+  for (auto& stepper : steppers)
+  {
+    long distance = stepper.distanceToGo();
+
+    if (distance != 0) {
+      initialized = false;
+      stepper.setSpeed(calibration_speed*(distance > 0 ? -1.0 : 1.0));
+    }
+    stepper.runSpeedToPosition();
+    index++;  }
+
+  if (initialized)
+  {
+    arm_state++;
+  }
 }
 
 void handle_packet(MotorPacket &packet)
@@ -121,29 +220,57 @@ void handle_packet(MotorPacket &packet)
   }
   else if (packet.flag == MotorPacket::MOT)
   {
-    for (auto i = 0u; i < num_steppers; i++)
+    for (int i = 0; i < num_steppers; i++)
     {
-      int cmd_vel = packet.stepper_vel[i];
-      int cmd_pos = max(packet.stepper_pos[i], stepper_lower_limits[i]);
-      cmd_pos = min(cmd_pos, stepper_upper_limits[i]);
-      steppers[i]->moveTo(cmd_pos);
-      steppers[i]->setSpeed(cmd_vel);
+      steppers[i].moveTo(packet.stepper_pos[i]);
     }
+    packet.flag = MotorPacket::ACK;
   }
   else if (packet.flag == MotorPacket::ENC)
   {
-    for (auto i = 0u; i < num_steppers; i++)
+    for (int i = 0; i < num_steppers; i++)
     {
-      int pos = steppers[i]->currentPosition();
-      packet.stepper_pos[i] = pos;
+      packet.stepper_pos[i] = steppers[i].currentPosition();
+    }
+  }
+  else if (packet.flag == MotorPacket::CAL)
+  {
+    packet.flag = MotorPacket::ACK;
+    
+    // check if system is in active state
+    if (arm_state == -1)
+    {
+      arm_state = 0;
+    }
+    // check if system has completed calibration -> set stepper initialization positions
+    else if (arm_state == num_switches)
+    {
+      for (int i = 0; i < num_steppers; i++)
+      {
+        steppers[i].moveTo(packet.stepper_pos[i]);
+        Serial.print("Stepper: ");
+        Serial.println(i);
+        Serial.print("Target Position: ");
+        Serial.println(packet.stepper_pos[i]);
+        Serial.print("Current Position: ");
+        Serial.println(steppers[i].currentPosition());
+      }
+      arm_state++;
+    }
+    // check if system has completed initialization
+    else if (arm_state == num_switches + 2)
+    {
+      arm_state = -1;
+      packet.flag = MotorPacket::CAL;
     }
   }
   else if (packet.flag == MotorPacket::HEY)
   {
-    for (auto i = 0u; i < num_steppers; i++)
-    {
-      steppers[i]->setCurrentPosition(packet.stepper_pos[i]);
-    }
+    packet.flag = MotorPacket::ACK;
+  }
+  else
+  {
+    packet.flag = MotorPacket::NACK;
   }
   packet.checksum = packet.calculate_checksum();
 }
