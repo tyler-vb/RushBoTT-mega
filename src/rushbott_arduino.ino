@@ -43,7 +43,7 @@ const int packet_size = sizeof(MotorPacket);
 uint8_t packet_buffer[packet_size];
 size_t byte_count = 0;
 unsigned long packet_start_time = 0;
-const unsigned int timeout_ms = 5;
+const unsigned int timeout_ms = 6;
 
 void setup() {
   for (int i = 0; i < num_switches; i++)
