@@ -41,9 +41,14 @@ const double calibration_speed = 0.3*steps_per_rev;
 
 const int packet_size = sizeof(MotorPacket);
 uint8_t packet_buffer[packet_size];
+MotorPacket packet = {};
 size_t byte_count = 0;
 unsigned long packet_start_time = 0;
 const unsigned int timeout_ms = 6;
+
+unsigned long last_packet_start_time_us = 0;
+
+unsigned long last_packet_total_time_us = 0;
 
 void setup() {
   for (int i = 0; i < num_switches; i++)
@@ -70,7 +75,7 @@ void loop() {
   if (Serial.available() > 0)
   {      
     uint8_t byte = Serial.read();
-
+    
     if (byte_count == 0 && byte == 0x64)
     {
       packet_start_time = millis();
@@ -82,11 +87,10 @@ void loop() {
     }
     if (byte_count == packet_size)
     {
-      MotorPacket packet = {};
       memcpy(&packet, packet_buffer, packet_size);
 
       handle_packet(packet);
-
+      
       memcpy(packet_buffer, &packet, packet_size);
       Serial.write(packet_buffer, packet_size);
 
@@ -98,30 +102,31 @@ void loop() {
   if (byte_count > 0 && millis() - packet_start_time > timeout_ms) 
   {
     byte_count = 0;
+    packet_buffer[0] = 0x00;
     packet_start_time = 0;
   }
 
-  poll_switches();
+  // poll_switches();
 
-  if (arm_state == -1)
-  {
-    digitalWrite(LED_PIN, LOW);
-    for (int i = 0; i < num_steppers; i++)
-    {
-      steppers[i].run();
-    }
-  }
-  else if (arm_state < num_switches)
-  {
-    digitalWrite(LED_PIN, HIGH);
-    calibrate();
-  }
-  else if (arm_state == num_switches + 1)
-  {
-    digitalWrite(LED_PIN, HIGH);
-    initialize();
+  // if (arm_state == -1)
+  // {
+  //   digitalWrite(LED_PIN, LOW);
+  //   for (int i = 0; i < num_steppers; i++)
+  //   {
+  //     steppers[i].run();
+  //   }
+  // }
+  // else if (arm_state < num_switches)
+  // {
+  //   digitalWrite(LED_PIN, HIGH);
+  //   calibrate();
+  // }
+  // else if (arm_state == num_switches + 1)
+  // {
+  //   digitalWrite(LED_PIN, HIGH);
+  //   initialize();
 
-  }
+  // }
   
 }
 
@@ -220,49 +225,43 @@ void handle_packet(MotorPacket &packet)
   }
   else if (packet.flag == MotorPacket::MOT)
   {
-    for (int i = 0; i < num_steppers; i++)
-    {
-      steppers[i].moveTo(packet.stepper_pos[i]);
-    }
     packet.flag = MotorPacket::ACK;
+    // for (int i = 0; i < num_steppers; i++)
+    // {
+    //   steppers[i].moveTo(packet.stepper[i]);
+    // }
   }
   else if (packet.flag == MotorPacket::ENC)
   {
-    for (int i = 0; i < num_steppers; i++)
-    {
-      packet.stepper_pos[i] = steppers[i].currentPosition();
-    }
+    // for (int i = 0; i < num_steppers; i++)
+    // {
+    //   packet.stepper[i] = steppers[i].currentPosition();
+    // }
   }
   else if (packet.flag == MotorPacket::CAL)
   {
     packet.flag = MotorPacket::ACK;
     
-    // check if system is in active state
-    if (arm_state == -1)
-    {
-      arm_state = 0;
-    }
-    // check if system has completed calibration -> set stepper initialization positions
-    else if (arm_state == num_switches)
-    {
-      for (int i = 0; i < num_steppers; i++)
-      {
-        steppers[i].moveTo(packet.stepper_pos[i]);
-        Serial.print("Stepper: ");
-        Serial.println(i);
-        Serial.print("Target Position: ");
-        Serial.println(packet.stepper_pos[i]);
-        Serial.print("Current Position: ");
-        Serial.println(steppers[i].currentPosition());
-      }
-      arm_state++;
-    }
-    // check if system has completed initialization
-    else if (arm_state == num_switches + 2)
-    {
-      arm_state = -1;
-      packet.flag = MotorPacket::CAL;
-    }
+    // // check if system is in active state
+    // if (arm_state == -1)
+    // {
+    //   arm_state = 0;
+    // }
+    // // check if system has completed calibration -> set stepper initialization positions
+    // else if (arm_state == num_switches)
+    // {
+    //   for (int i = 0; i < num_steppers; i++)
+    //   {
+    //     steppers[i].moveTo(packet.stepper[i]);
+    //   }
+    //   arm_state++;
+    // }
+    // // check if system has completed initialization
+    // else if (arm_state == num_switches + 2)
+    // {
+    //   arm_state = -1;
+    //   packet.flag = MotorPacket::CAL;
+    // }
   }
   else if (packet.flag == MotorPacket::HEY)
   {
