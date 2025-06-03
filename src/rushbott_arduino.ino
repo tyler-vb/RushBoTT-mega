@@ -34,9 +34,7 @@ LimitSwitch switches[] = {
 };
 
 const int num_switches = sizeof(switches) / sizeof(switches[0]);
-const unsigned long debounce_delay = 25;
 int arm_state = -1;
-bool calibrating = false;
 const double calibration_speed = 0.3*steps_per_rev;
 
 const int packet_size = sizeof(MotorPacket);
@@ -106,57 +104,39 @@ void loop() {
     packet_start_time = 0;
   }
 
-  // poll_switches();
-
-  // if (arm_state == -1)
-  // {
-  //   digitalWrite(LED_PIN, LOW);
-  //   for (int i = 0; i < num_steppers; i++)
-  //   {
-  //     steppers[i].run();
-  //   }
-  // }
-  // else if (arm_state < num_switches)
-  // {
-  //   digitalWrite(LED_PIN, HIGH);
-  //   calibrate();
-  // }
-  // else if (arm_state == num_switches + 1)
-  // {
-  //   digitalWrite(LED_PIN, HIGH);
-  //   initialize();
-
-  // }
-  
-}
-
-void poll_switches()
-{
-  for (int i = 0; i < num_switches; i++)
-  {
-    LimitSwitch &sw = switches[i];
-    bool current_state = digitalRead(sw.pin);
-
-    if (current_state != sw.last_state)
-    {
-      sw.last_debounce = millis();
-    }
-
-    if ((millis() - sw.last_debounce) > debounce_delay)
-    {
-      if (current_state == HIGH && !sw.pressed)
-      {
-        sw.pressed = true;
-        steppers[sw.stepper_index].setCurrentPosition(sw.limit);
-      }
-      else if (current_state == LOW && sw.pressed)
-      {
-        sw.pressed = false;
+  if (arm_state < -1 || arm_state > num_switches) {
+  for (int i = 0; i < num_switches; i++) {
+    if (digitalRead(switches[i].pin) == LOW) {
+      arm_state = -2;
+      break;
       }
     }
-
-    sw.last_state = current_state;
   }
+
+  if (arm_state == -2)
+  {
+        for (int i = 0; i < num_steppers; i++)
+    {
+      steppers[i].stop();
+    }
+  }
+  else if (arm_state == -1)
+  {
+    for (int i = 0; i < num_steppers; i++)
+    {
+      steppers[i].run();
+    }
+  }
+  else if (arm_state < num_switches)
+  {
+    calibrate();
+  }
+  else if (arm_state == num_switches + 1)
+  {
+    initialize();
+
+  }
+  
 }
 
 void calibrate()
@@ -171,26 +151,33 @@ void calibrate()
     return;
   }
 
-  if (!calibrating)
+  if (stepper.targetPosition() != 0)
   {
-    if (lim_switch.pressed)
+    if (digitalRead(lim_switch.pin) == HIGH)
     {
-    stepper.move(-0.1*5.785714*steps_per_rev);
-    stepper.setSpeed(-calibration_speed);
+      arm_state++;
+      return;
     }
     else if (stepper.distanceToGo() == 0)
     {
-      calibrating = true;
+      arm_state = -2;
+    }
+
+  }
+  else if (stepper.distanceToGo() == 0)
+  {
+    if (digitalRead(lim_switch.pin) == HIGH)
+    {
+      stepper.setCurrentPosition(0.1*5.785714*steps_per_rev);
+      stepper.move(0);
+    }
+    else
+    {
       stepper.move(5.785714*steps_per_rev);
-      stepper.setSpeed(calibration_speed);
     }
   }
-  else if (lim_switch.pressed)
-  {
-    stepper.stop();
-    calibrating = false;
-    arm_state++;
-  }
+
+  stepper.setSpeed(-calibration_speed);
   stepper.runSpeedToPosition();
 }
 
@@ -226,42 +213,48 @@ void handle_packet(MotorPacket &packet)
   else if (packet.flag == MotorPacket::MOT)
   {
     packet.flag = MotorPacket::ACK;
-    // for (int i = 0; i < num_steppers; i++)
-    // {
-    //   steppers[i].moveTo(packet.stepper[i]);
-    // }
+    for (int i = 0; i < num_steppers; i++)
+    {
+      steppers[i].moveTo(packet.stepper[i]);
+    }
   }
   else if (packet.flag == MotorPacket::ENC)
   {
-    // for (int i = 0; i < num_steppers; i++)
-    // {
-    //   packet.stepper[i] = steppers[i].currentPosition();
-    // }
+    for (int i = 0; i < num_steppers; i++)
+    {
+      packet.stepper[i] = steppers[i].currentPosition();
+    }
   }
   else if (packet.flag == MotorPacket::CAL)
   {
     packet.flag = MotorPacket::ACK;
     
-    // // check if system is in active state
-    // if (arm_state == -1)
-    // {
-    //   arm_state = 0;
-    // }
-    // // check if system has completed calibration -> set stepper initialization positions
-    // else if (arm_state == num_switches)
-    // {
-    //   for (int i = 0; i < num_steppers; i++)
-    //   {
-    //     steppers[i].moveTo(packet.stepper[i]);
-    //   }
-    //   arm_state++;
-    // }
-    // // check if system has completed initialization
-    // else if (arm_state == num_switches + 2)
-    // {
-    //   arm_state = -1;
-    //   packet.flag = MotorPacket::CAL;
-    // }
+    // check if system is in active state
+    if (arm_state == -1)
+    {
+      arm_state = 0;
+      for (int i = 0; i < num_steppers; i++)
+      {
+        steppers[i].setCurrentPosition(0);
+        steppers[i].move(0);
+      }
+      arm_state++;
+    }
+    // check if system has completed calibration -> set stepper initialization positions
+    else if (arm_state == num_switches)
+    {
+      for (int i = 0; i < num_steppers; i++)
+      {
+        steppers[i].moveTo(packet.stepper[i]);
+      }
+      arm_state++;
+    }
+    // check if system has completed initialization
+    else if (arm_state == num_switches + 2)
+    {
+      arm_state = -1;
+      packet.flag = MotorPacket::CAL;
+    }
   }
   else if (packet.flag == MotorPacket::HEY)
   {
